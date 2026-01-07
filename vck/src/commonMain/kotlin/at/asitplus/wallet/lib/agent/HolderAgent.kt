@@ -46,11 +46,12 @@ class HolderAgent(
     private val validatorVcJws: ValidatorVcJws = ValidatorVcJws(validator = validator),
     private val validatorSdJwt: ValidatorSdJwt = ValidatorSdJwt(validator = validator),
     private val validatorMdoc: ValidatorMdoc = ValidatorMdoc(validator = validator),
+    private val keyStorage: KeyMaterialStorage? = null,
     private val signVerifiablePresentation: SignJwtFun<VerifiablePresentationJws> =
-        SignJwt(keyMaterial, JwsHeaderCertOrJwk()),
-    private val signKeyBinding: SignJwtFun<KeyBindingJws> = SignJwt(keyMaterial, JwsHeaderNone()),
+        SignJwt((keyStorage?.get("key-1") ?: keyMaterial), JwsHeaderCertOrJwk()),
+    private val signKeyBinding: SignJwtFun<KeyBindingJws> = SignJwt((keyStorage?.get("key-1") ?: keyMaterial), JwsHeaderNone()),
     private val verifiablePresentationFactory: VerifiablePresentationFactory =
-        VerifiablePresentationFactory(keyMaterial, signVerifiablePresentation, signKeyBinding),
+        VerifiablePresentationFactory((keyStorage?.get("key-1") ?: keyMaterial), signVerifiablePresentation, signKeyBinding),
     private val difInputEvaluator: PresentationExchangeInputEvaluator = PresentationExchangeInputEvaluator,
 ) : Holder {
 
@@ -61,7 +62,8 @@ class HolderAgent(
     override suspend fun storeCredential(credential: Holder.StoreCredentialInput) = catching {
         when (credential) {
             is Holder.StoreCredentialInput.Vc -> {
-                val validated = validatorVcJws.verifyVcJws(credential.signedVcJws, keyMaterial.publicKey)
+                val validated = validatorVcJws.verifyVcJws(credential.signedVcJws, (keyStorage?.get("key-1")?.publicKey
+                    ?: keyMaterial.publicKey))
                 if (validated !is Verifier.VerifyCredentialResult.SuccessJwt) {
                     val error = (validated as? Verifier.VerifyCredentialResult.ValidationError)?.cause
                         ?: Throwable("Invalid VC JWS")
@@ -75,7 +77,8 @@ class HolderAgent(
             }
 
             is Holder.StoreCredentialInput.SdJwt -> {
-                val validated = validatorSdJwt.verifySdJwt(credential.signedSdJwtVc, keyMaterial.publicKey)
+                val validated = validatorSdJwt.verifySdJwt(credential.signedSdJwtVc, (keyStorage?.get("key-1")?.publicKey
+                    ?: keyMaterial.publicKey))
                 if (credential.signedSdJwtVc.keyBindingJws != null) Throwable("Issued SD-JWT credentials must not contain a KB")
                 if (validated !is Verifier.VerifyCredentialResult.SuccessSdJwt) {
                     val error = (validated as? Verifier.VerifyCredentialResult.ValidationError)?.cause
