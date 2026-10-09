@@ -1,6 +1,5 @@
 package at.asitplus.wallet.lib.cp
 
-import at.asitplus.KmmResult
 import at.asitplus.catching
 import at.asitplus.data.NonEmptyList.Companion.toNonEmptyList
 import at.asitplus.iso.sha256
@@ -15,17 +14,19 @@ import at.asitplus.openid.dcql.DCQLSdJwtCredentialMetadataAndValidityConstraints
 import at.asitplus.openid.dcql.DCQLSdJwtCredentialQuery
 import at.asitplus.signum.indispensable.CryptoPublicKey
 import at.asitplus.signum.indispensable.Digest
+import at.asitplus.signum.indispensable.io.ByteArrayBase64UrlSerializer
+import at.asitplus.signum.indispensable.io.InstantLongSerializer
 import at.asitplus.signum.indispensable.josef.JsonWebKey
 import at.asitplus.signum.indispensable.josef.JwsCompact
 import at.asitplus.signum.indispensable.josef.JwsCompactTyped
+import at.asitplus.signum.indispensable.josef.typed
+import at.asitplus.signum.supreme.hash.digest
 import at.asitplus.testballoon.matrix.fixture
 import at.asitplus.testballoon.matrix.matrixSuite
 import at.asitplus.wallet.lib.agent.CreatePresentationResult
 import at.asitplus.wallet.lib.agent.CredentialToBeIssued
 import at.asitplus.wallet.lib.agent.DummyCredentialDataProvider
-import at.asitplus.wallet.lib.agent.EphemeralKeyWithSelfSignedCert
 import at.asitplus.wallet.lib.agent.EphemeralKeyWithoutCert
-import at.asitplus.wallet.lib.agent.FixedTimePeriodProvider
 import at.asitplus.wallet.lib.agent.Holder
 import at.asitplus.wallet.lib.agent.HolderAgent
 import at.asitplus.wallet.lib.agent.InMemoryIssuerCredentialStore
@@ -44,50 +45,42 @@ import at.asitplus.wallet.lib.agent.Validator
 import at.asitplus.wallet.lib.agent.ValidatorSdJwt
 import at.asitplus.wallet.lib.agent.Verifier
 import at.asitplus.wallet.lib.agent.VerifierAgent
+import at.asitplus.wallet.lib.agent.toDigest
 import at.asitplus.wallet.lib.agent.toEncryptionJsonWebKey
 import at.asitplus.wallet.lib.agent.toStoreCredentialInput
-import at.asitplus.wallet.lib.agent.validation.StatusListTokenResolver
 import at.asitplus.wallet.lib.agent.validation.TokenStatusResolver
-import at.asitplus.wallet.lib.agent.validation.TokenStatusResolverImpl
 import at.asitplus.wallet.lib.data.ConstantIndex
 import at.asitplus.wallet.lib.data.ConstantIndex.AtomicAttribute2023.CLAIM_DATE_OF_BIRTH
 import at.asitplus.wallet.lib.data.ConstantIndex.AtomicAttribute2023.CLAIM_GIVEN_NAME
 import at.asitplus.wallet.lib.data.ConstantIndex.CredentialRepresentation.SD_JWT
 import at.asitplus.wallet.lib.data.CredentialPresentationRequest
 import at.asitplus.wallet.lib.data.KeyBindingJws
-import at.asitplus.wallet.lib.data.rfc.tokenStatusList.StatusListInfo
-import at.asitplus.wallet.lib.data.rfc.tokenStatusList.agents.communication.primitives.StatusListTokenMediaType
+import at.asitplus.wallet.lib.data.VerifiableCredentialSdJwt
 import at.asitplus.wallet.lib.data.rfc.tokenStatusList.primitives.TokenStatusValidationResult
 import at.asitplus.wallet.lib.data.rfc3986.toUri
-import at.asitplus.wallet.lib.extensions.ifFalse
 import at.asitplus.wallet.lib.extensions.sdHashInput
 import at.asitplus.wallet.lib.jws.JwsContentTypeConstants
-import at.asitplus.wallet.lib.jws.JwsHeaderIdentifierFun
 import at.asitplus.wallet.lib.jws.JwsHeaderNone
 import at.asitplus.wallet.lib.jws.SdJwtSigned
 import at.asitplus.wallet.lib.jws.SignJwt
 import at.asitplus.wallet.lib.jws.SignJwtFun
 import at.asitplus.wallet.lib.jws.VerifyJwsSignature
-import at.asitplus.wallet.lib.jws.VerifyStatusListTokenHAIP
 import at.asitplus.wallet.lib.randomCwtOrJwtResolver
 import com.benasher44.uuid.uuid4
-import io.kotest.assertions.throwables.shouldNotThrow
 import io.kotest.assertions.throwables.shouldNotThrowAny
-import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.matchers.booleans.shouldBeTrue
-import io.kotest.matchers.collections.shouldContain
+import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.types.shouldBeInstanceOf
-import io.kotest.matchers.types.shouldNotBeInstanceOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.time.Clock
+import kotlin.time.Instant
 
 
-val WscdSignedBinding by matrixSuite {
+val CrossSignedBinding by matrixSuite {
 
     fixture {
         runBlocking {
@@ -155,6 +148,7 @@ val WscdSignedBinding by matrixSuite {
                 val holder2 = holder2
                 val wscd = wscd
                 val holderCredentialStore = holderCredentialStore
+                val holderCredentialStore2 = holderCredentialStore2
                 val statusListIssuer = statusListIssuer
                 val statusListCa = statusListCa
                 val caSignedStatusListIssuer = caSignedStatusListIssuer
@@ -170,43 +164,53 @@ val WscdSignedBinding by matrixSuite {
         }
     } - {
 
-        "wscd binding: combined presentation with trusted statement verifies" {
+        "cross-signed binding: both KB-JWTs carry common digest over holder keys and sd hashes" {
             val request = it.verifier.createPresentationRequest()
-            val presentationParameters = it.holder1.createDefaultPresentation(
-                request = request,
-                credentialPresentationRequest = CredentialPresentationRequest.DCQLRequest(
-                    buildDCQLQuery(
-                        DCQLJsonClaimsQuery(
-                            path = DCQLClaimsPathPointer(CLAIM_GIVEN_NAME),
-                        ),
-                    )
-                )
-            ).getOrThrow() as PresentationResponseParameters.DCQLParameters
 
-            val vp1 = presentationParameters.verifiablePresentations.values.flatten().firstOrNull()
-                .shouldBeInstanceOf<CreatePresentationResult.SdJwt>()
+            val entry1 = it.holderCredentialStore.getCredentials().getOrThrow()
+                .filterIsInstance<SubjectCredentialStore.StoreEntry.SdJwt>().first()
+            val entry2 = it.holderCredentialStore2.getCredentials().getOrThrow()
+                .filterIsInstance<SubjectCredentialStore.StoreEntry.SdJwt>().first()
 
-            val presentation2Parameters = it.holder2.createDefaultPresentation(
-                request = request,
-                credentialPresentationRequest = CredentialPresentationRequest.DCQLRequest(
-                    buildDCQLQuery(
-                        DCQLJsonClaimsQuery(
-                            path = DCQLClaimsPathPointer(CLAIM_DATE_OF_BIRTH),
-                        ),
-                    )
-                )
-            ).getOrThrow() as PresentationResponseParameters.DCQLParameters
+            val disclosures1 = entry1.disclosures.filter { it.value!!.claimName == CLAIM_GIVEN_NAME }.keys
+            val disclosures2 = entry2.disclosures.filter { it.value!!.claimName == CLAIM_DATE_OF_BIRTH }.keys
 
-            val vp2 = presentation2Parameters.verifiablePresentations.values.flatten().firstOrNull()
-                .shouldBeInstanceOf<CreatePresentationResult.SdJwt>()
+            val digest1 = entry1.sdJwt.selectiveDisclosureAlgorithm?.toDigest() ?: Digest.SHA256
+            val digest2 = entry2.sdJwt.selectiveDisclosureAlgorithm?.toDigest() ?: Digest.SHA256
 
-            val signedBindingStatement = it.wscd.signBindingStatement(
-                listOf(it.wscd.pidHolderKey.jsonWebKey, it.wscd.eaaHolderKey.jsonWebKey),
-                request.nonce,
-                request.audience
+
+            val sdHash1 = digest1.digest(SdJwtSigned.sdHashInput(entry1, disclosures1).encodeToByteArray())
+            val sdHash2 = digest2.digest(SdJwtSigned.sdHashInput(entry2, disclosures2).encodeToByteArray())
+
+
+            val pairs = listOf(
+                Pair(it.wscd.pidHolderKey.jsonWebKey, sdHash1),
+                Pair(it.wscd.eaaHolderKey.jsonWebKey, sdHash2)
             )
 
-            val combinedPresentation = CombinedPresentation(listOf(vp1, vp2), signedBindingStatement)
+//            TODO something like this if need to check the sdAlg
+//            val sdAlg = if vp1.sdJwt.jws.getPayload<VerifiableCredentialSdJwt>().getOrThrow().selectiveDisclosureAlgorithm!! == "sha-256"
+
+            val crossBinding =
+                crossBindingDigest(pairs, CrossBindingVariant.KEYS_AND_SD_HASH, digest1)
+
+            val vp1 = createSdJwtPresentation(
+                SignJwt(it.wscd.pidHolderKey, JwsHeaderNone()),
+                request.audience,
+                request.nonce,
+                entry1,
+                CLAIM_GIVEN_NAME,
+                crossBinding = crossBinding
+            )
+            val vp2 = createSdJwtPresentation(
+                SignJwt(it.wscd.eaaHolderKey, JwsHeaderNone()),
+                request.audience, request.nonce,
+                entry2 as SubjectCredentialStore.StoreEntry.SdJwt,
+                CLAIM_DATE_OF_BIRTH,
+                crossBinding = crossBinding
+            )
+
+            val combinedPresentation = CombinedPresentation(listOf(vp1, vp2))
 
             val session = it.verifier.consumeChallenge(request.nonce)
 
@@ -221,12 +225,11 @@ val WscdSignedBinding by matrixSuite {
                 }
 
             shouldNotThrowAny {
-                verifyWscdBinding(
-                    signedBindingStatement,
+                verifyCrossSignedBinding(
                     listOf(result1, result2),
-                    setOf(it.wscd.wscdKey.publicKey),
                     request.nonce,
-                    request.audience
+                    request.audience,
+                    CrossBindingVariant.KEYS_AND_SD_HASH
                 )
             }
         }
@@ -279,126 +282,101 @@ private fun buildDCQLQuery(vararg claimsQueries: DCQLJsonClaimsQuery) = DCQLQuer
     )
 )
 
-suspend fun createFreshSdJwtKeyBinding(challenge: String, verifierId: String): String {
-    val holderKeyMaterial = EphemeralKeyWithoutCert()
-    val holder = HolderAgent(holderKeyMaterial)
-    val issuer = IssuerAgent(
-        identifier = "https://issuer.example.com/".toUri(),
-        randomSource = RandomSource.Default
-    )
-    DummyCredentialDataProvider.issueAndStoreSdJwt(holder, holderKeyMaterial, issuer)
-
-    val presentationResult = holder.createDefaultPresentation(
-        request = PresentationRequestParameters(nonce = challenge, audience = verifierId),
-        credentialPresentationRequest = CredentialPresentationRequest.DCQLRequest(
-            buildDCQLQuery(
-                DCQLJsonClaimsQuery(
-                    path = DCQLClaimsPathPointer(CLAIM_GIVEN_NAME),
-                )
-            )
-        )
-    ).getOrThrow().shouldBeInstanceOf<PresentationResponseParameters.DCQLParameters>()
-    return (presentationResult.verifiablePresentations.values.first()
-        .first() as CreatePresentationResult.SdJwt).serialized
-}
-
 private suspend fun createSdJwtPresentation(
-    signKeyBindingJws: SignJwtFun<KeyBindingJws>,
+    signKeyBindingJws: SignJwtFun<CrossBoundKeyBindingJws>,
     audienceId: String,
     challenge: String,
     validSdJwtCredential: SubjectCredentialStore.StoreEntry.SdJwt,
     claimName: String,
+    crossBinding: ByteArray?
 ): CreatePresentationResult.SdJwt {
     val filteredDisclosures = validSdJwtCredential.disclosures
         .filter { it.value!!.claimName == claimName }.keys
     val issuerJwtPlusDisclosures = SdJwtSigned.sdHashInput(validSdJwtCredential, filteredDisclosures)
-    val keyBinding = createKeyBindingJws(signKeyBindingJws, audienceId, challenge, issuerJwtPlusDisclosures)
+    val keyBinding =
+        createCrossBoundKeyBindingJws(signKeyBindingJws, audienceId, challenge, issuerJwtPlusDisclosures, crossBinding)
     val sdJwtSerialized = validSdJwtCredential.vcSerialized.substringBefore("~")
     val jwsFromIssuer = catching { JwsCompact(sdJwtSerialized) }.getOrElse {
         throw PresentationException(it)
     }
-    val sdJwt = SdJwtSigned.presented(jwsFromIssuer, filteredDisclosures, keyBinding)
+    val sdJwt = SdJwtSigned.presented(jwsFromIssuer, filteredDisclosures, keyBinding = keyBinding)
     return CreatePresentationResult.SdJwt(sdJwt.serialize(), sdJwt)
 }
 
-private suspend fun createKeyBindingJws(
-    signKeyBindingJws: SignJwtFun<KeyBindingJws>,
+private suspend fun createCrossBoundKeyBindingJws(
+    signKeyBindingJws: SignJwtFun<CrossBoundKeyBindingJws>,
     audienceId: String,
     challenge: String,
     issuerJwtPlusDisclosures: String,
+    crossBinding: ByteArray?
 ): JwsCompactTyped<KeyBindingJws> = signKeyBindingJws(
     JwsContentTypeConstants.KB_JWT,
-    KeyBindingJws(
+    CrossBoundKeyBindingJws(
         issuedAt = Clock.System.now(),
         audience = audienceId,
         challenge = challenge,
         sdHash = issuerJwtPlusDisclosures.encodeToByteArray().sha256(),
+        crossBinding = crossBinding
     ),
-    KeyBindingJws.serializer(),
+    CrossBoundKeyBindingJws.serializer(),
 ).getOrElse {
     throw PresentationException(it)
-}
+}.jws.typed()
 
-data class SimulatedWscd(
-    val pidHolderKey: KeyMaterial = EphemeralKeyWithoutCert(customKeyId = "pid_key"),
-    val eaaHolderKey: KeyMaterial = EphemeralKeyWithoutCert(customKeyId = "eaa_key"),
-//    val holderKeys: List<JsonWebKey> = emptyList(),
-    val wscdKey: KeyMaterial = EphemeralKeyWithoutCert()
-) {
-    suspend fun signBindingStatement(
-        holderKeys: List<JsonWebKey>,
-        nonce: String,
-        audience: String
-    ): JwsCompactTyped<WscdBindingStatement> {
-        checkPossessionOfHolderKey(holderKeys)
-        val payload = WscdBindingStatement(holderKeys.map { it.wscdFingerprint() }, nonce, audience)
-        return SignJwt<WscdBindingStatement>(wscdKey, JwsHeaderNone())(
-            type = "wscd-binding+jwt",
-            payload = payload,
-            serializer = WscdBindingStatement.serializer()
-        ).getOrThrow()
-    }
+@Serializable
+data class CrossBoundKeyBindingJws(
+    // KB-JWT payload + cross_binding
+    @SerialName("iat") @Serializable(InstantLongSerializer::class) val issuedAt: Instant,
+    @SerialName("aud") val audience: String,
+    @SerialName("nonce") val challenge: String,
+    @SerialName("sd_hash") @Serializable(ByteArrayBase64UrlSerializer::class) val sdHash: ByteArray,
+    @SerialName("cross_binding") @Serializable(ByteArrayBase64UrlSerializer::class) val crossBinding: ByteArray? = null,
+)
 
-    private fun checkPossessionOfHolderKey(holderKeys: List<JsonWebKey>) {
-        holderKeys.any {
-            mutableListOf(
-                pidHolderKey.toEncryptionJsonWebKey().wscdFingerprint(),
-                eaaHolderKey.toEncryptionJsonWebKey().wscdFingerprint()
-            ).contains(it.wscdFingerprint()).shouldBeTrue()
-        }
-    }
-}
+enum class CrossBindingVariant { KEYS, KEYS_AND_SD_HASH }
 
 // Extend when not wanting to use Sha-256 but _sd_alg from first attestation
 private fun JsonWebKey.wscdFingerprint(): String = jwkThumbprint
 
-@Serializable
-data class WscdBindingStatement(
-    @SerialName("keys")
-    val keys: List<String>,
-    @SerialName("nonce")
-    val nonce: String,
-    @SerialName("aud")
-    val audience: String,
-) {}
+private fun crossBindingDigest(
+    entries: List<Pair<JsonWebKey, ByteArray>>, // (holder pk, sd_hash), in CP order
+    variant: CrossBindingVariant = CrossBindingVariant.KEYS,
+    digest: Digest = Digest.SHA256, // _sd_alg of first attestation, default SHA-256
+): ByteArray {
+    if (variant == CrossBindingVariant.KEYS) {
+        return digest.digest(
+            entries.fold(byteArrayOf()) { acc, (key, _) -> acc + key.wscdFingerprint().encodeToByteArray() }
+        )
+    } else {
+        return digest.digest(
+            entries.fold(byteArrayOf()) { acc, (key, sdHash) ->
+                acc + (key.wscdFingerprint().encodeToByteArray() + sdHash)
+            }
+        )
+    }
+}
 
-data class CombinedPresentation(
-    val attestations: List<CreatePresentationResult>,
-    val bindingStatement: JwsCompactTyped<WscdBindingStatement>? = null,
-)
-
-private suspend fun verifyWscdBinding(
-    statement: JwsCompactTyped<WscdBindingStatement>,
+private fun verifyCrossSignedBinding(
     presentations: List<Verifier.VerifyPresentationResult.SuccessSdJwt>,
-    trustedWscdKeys: Set<CryptoPublicKey>,
     expectedNonce: String,
-    expectedAudience: String
+    expectedAudience: String,
+    variant: CrossBindingVariant,
 ) {
-    trustedWscdKeys.any { VerifyJwsSignature()(statement.jws, it).isSuccess }
-    val keyFingerprints =
-        presentations.map { it.verifiableCredentialSdJwt.confirmationClaim!!.jsonWebKey!!.wscdFingerprint() }
-    statement.payload.keys.forEach { keyFingerprints.contains(it).shouldBeTrue() }
+    val holderKeySdHashPairs = presentations.map {
+        Pair(
+            it.verifiableCredentialSdJwt.confirmationClaim!!.jsonWebKey!!,
+            it.sdJwtSigned.keyBindingJws!!.payload.sdHash
+        )
+    }
+    val digest = presentations.first().verifiableCredentialSdJwt.selectiveDisclosureAlgorithm?.toDigest() ?: Digest.SHA256
+    val expected = crossBindingDigest(holderKeySdHashPairs, variant, digest)
 
-    expectedAudience shouldBe statement.payload.audience
-    expectedNonce shouldBe statement.payload.nonce
+
+    presentations.forEach {
+        val kb = it.sdJwtSigned.keyBindingJws!!.jws.getPayload<CrossBoundKeyBindingJws>().getOrThrow()
+
+        kb.challenge shouldBe expectedNonce
+        kb.audience shouldBe expectedAudience
+        kb.crossBinding.shouldNotBeNull().contentEquals(expected).shouldBeTrue()
+    }
 }
